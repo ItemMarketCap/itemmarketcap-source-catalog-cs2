@@ -1,20 +1,30 @@
 name: Sync upstream
 
-# Puxa o ByMykel/CSGO-API pro main deste fork, todo dia.
+# Puxa o ByMykel/CSGO-API pro main deste repo, uma vez por semana.
+#
+# Motor é git puro, não a API merge-upstream. Dois motivos:
+#
+#   1. merge-upstream depende da relação de fork, e este repo saiu da rede pra
+#      poder ser privado. Sem fork, aquela API não existe.
+#   2. git puro é agnóstico de fornecedor. O nome source-catalog-cs2 foi
+#      escolhido justamente pra não amarrar ao ByMykel — se um dia a fonte virar
+#      SteamDatabase/GameTracking-CS2, muda uma URL aqui e mais nada.
 #
 # Merge automático, sem PR, de propósito: o diff é de dezenas de MB de JSON
-# gerado, e revisar isso é teatro — ninguém lê. O portão de verdade é o deploy,
-# que é manual (deploy-catalog.yml). Push ruim do upstream chega aqui mas não
-# chega em produção enquanto você não mandar.
+# gerado, e revisar isso é teatro. O portão de verdade é o deploy, que é manual
+# e mora no umbrella. Push ruim do upstream chega ao main e para ali.
 #
-# O fork diverge do upstream pelos arquivos deste diretório, então o
-# merge-upstream faz merge em vez de fast-forward. Sem conflito, porque o
-# upstream nunca toca nestes arquivos — mas se um dia tocar, o job falha alto
-# em vez de resolver sozinho.
+# ⚠️ CADÊNCIA: o upstream atualiza com intervalo mediano de 1 dia. Semanal
+# significa catálogo até 7 dias atrasado — o que morde quando a Valve solta
+# coleção nova e os itens ficam invisíveis durante o pico de interesse. Se isso
+# doer, o dispatch manual está aí, e virar diário é trocar o cron.
 
 on:
   schedule:
-    - cron: "0 7 * * *"   # 04:00 BRT
+    # sexta 06:00 UTC (03:00 BRT). O pico de commits do bot é quinta, e o
+    # horário deles concentra em 22h–01h UTC — então isso pega a quinta inteira,
+    # incluindo o que vaza pra madrugada de sexta.
+    - cron: "0 6 * * 5"
   workflow_dispatch:
 
 permissions:
@@ -27,33 +37,44 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
+
     steps:
-      - name: merge-upstream em main
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
+      # fetch-depth 0 é obrigatório: merge precisa das duas histórias inteiras.
+      # São ~280 MB — é o preço de sair da rede de forks, já que a API fazia
+      # isso server-side e de graça.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Buscar o upstream
         run: |
-          set -o pipefail
-          if ! out=$(gh api -X POST "repos/$REPO/merge-upstream" -f branch=main 2>&1); then
-            echo "::error::merge-upstream falhou — provavelmente conflito com o upstream"
-            echo "$out"
+          set -euo pipefail
+          git remote add upstream https://github.com/ByMykel/CSGO-API.git
+          git fetch --no-tags upstream main
+          echo "atrás: $(git rev-list --count HEAD..upstream/main) commits"
+          echo "à frente: $(git rev-list --count upstream/main..HEAD) commits (nossos workflows)"
+
+      - name: Merge
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          behind=$(git rev-list --count HEAD..upstream/main)
+          if [ "$behind" = "0" ]; then
+            echo "já estava em dia" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Sem -X: conflito tem que falhar alto. O upstream não toca nos nossos
+          # arquivos, então conflito aqui significa que alguma premissa mudou.
+          if ! git merge --no-edit upstream/main; then
+            echo "::error::conflito com o upstream — resolver à mão"
+            git merge --abort
             exit 1
           fi
-          echo "$out"
-          type=$(echo "$out" | jq -r '.merge_type // "unknown"')
-          echo "merge_type=$type" >> "$GITHUB_STEP_SUMMARY"
-          case "$type" in
-            none)         echo "já estava em dia" ;;
-            fast-forward) echo "::notice::fast-forward — o fork ainda não divergiu" ;;
-            merge)        echo "::notice::merge — normal, o fork tem os workflows próprios" ;;
-          esac
 
-      - name: O que mudou
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          gh api "repos/$REPO/commits?sha=main&per_page=10" \
-            --jq '.[] | "- \(.sha[0:7]) \(.commit.message | split("\n")[0])"' \
-            >> "$GITHUB_STEP_SUMMARY" || true
+          git push origin main
+          echo "### $behind commit(s) do upstream" >> "$GITHUB_STEP_SUMMARY"
+          git log --oneline "HEAD@{1}..HEAD" --no-merges | head -30 >> "$GITHUB_STEP_SUMMARY"
