@@ -1,25 +1,26 @@
 name: Sync upstream
 
-# Puxa o ByMykel/CSGO-API pro main deste repo, todo dia.
+# Pulls ByMykel/CSGO-API into this repo's main, every day.
 #
-# Motor é git puro, não a API merge-upstream — mesmo o repo sendo fork e a API
-# estando disponível. O motivo é que o nome source-catalog-cs2 foi escolhido pra
-# não amarrar ao fornecedor: se um dia a fonte virar SteamDatabase/GameTracking,
-# git puro muda uma URL e mais nada, enquanto merge-upstream deixa de existir —
-# você não pode fazer merge-upstream de um repo do qual não é fork.
+# The engine is plain git, not the merge-upstream API — even though this repo is
+# a fork and the API is available. The reason is that the name source-catalog-cs2
+# was chosen so as not to tie us to the vendor: if the source ever becomes
+# SteamDatabase/GameTracking, plain git changes one URL and nothing else, while
+# merge-upstream stops existing — you cannot merge-upstream a repo you are not a
+# fork of.
 #
-# O custo é clonar ~280 MB por execução em vez de uma chamada server-side. Num
-# repo público os minutos de Actions são livres, então é wall-clock, não fatura.
+# The cost is cloning ~280 MB per run instead of one server-side call. On a
+# public repo Actions minutes are free, so it is wall-clock, not billing.
 #
-# Merge automático, sem PR, de propósito: o diff é de dezenas de MB de JSON
-# gerado, e revisar isso é teatro. O portão de verdade é o deploy, que é manual
-# e mora no umbrella. Push ruim do upstream chega ao main e para ali.
+# Automatic merge, no PR, on purpose: the diff is tens of MB of generated JSON,
+# and reviewing that is theater. The real gate is the deploy, which is manual and
+# lives in the umbrella. A bad push from upstream reaches main and stops there.
 
 on:
   schedule:
-    # 06:00 UTC (03:00 BRT), diário. Os commits de bot do upstream concentram
-    # em 22h–01h UTC, então isso pega a janela inteira do dia anterior.
-    # Intervalo mediano entre updates deles é 1 dia — daí diário e não semanal.
+    # 06:00 UTC (03:00 BRT), daily. Upstream's bot commits cluster between
+    # 22:00 and 01:00 UTC, so this catches the whole previous-day window.
+    # Their median interval between updates is 1 day — hence daily, not weekly.
     - cron: "0 6 * * *"
   workflow_dispatch:
 
@@ -36,18 +37,18 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      # fetch-depth 0 é obrigatório: merge precisa das duas histórias inteiras.
+      # fetch-depth 0 is mandatory: a merge needs both histories in full.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Buscar o upstream
+      - name: Fetch upstream
         run: |
           set -euo pipefail
           git remote add upstream https://github.com/ByMykel/CSGO-API.git
           git fetch --no-tags upstream main
-          echo "atrás: $(git rev-list --count HEAD..upstream/main) commits"
-          echo "à frente: $(git rev-list --count upstream/main..HEAD) commits (nossos workflows)"
+          echo "behind: $(git rev-list --count HEAD..upstream/main) commits"
+          echo "ahead: $(git rev-list --count upstream/main..HEAD) commits (our workflows)"
 
       - name: Merge
         run: |
@@ -57,18 +58,18 @@ jobs:
 
           behind=$(git rev-list --count HEAD..upstream/main)
           if [ "$behind" = "0" ]; then
-            echo "já estava em dia" >> "$GITHUB_STEP_SUMMARY"
+            echo "already up to date" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          # Sem -X: conflito tem que falhar alto. O upstream não toca nos nossos
-          # arquivos, então conflito aqui significa que alguma premissa mudou.
+          # No -X: a conflict has to fail loudly. Upstream does not touch our
+          # files, so a conflict here means some premise changed.
           if ! git merge --no-edit upstream/main; then
-            echo "::error::conflito com o upstream — resolver à mão"
+            echo "::error::conflict with upstream — resolve by hand"
             git merge --abort
             exit 1
           fi
 
           git push origin main
-          echo "### $behind commit(s) do upstream" >> "$GITHUB_STEP_SUMMARY"
+          echo "### $behind commit(s) from upstream" >> "$GITHUB_STEP_SUMMARY"
           git log --oneline "HEAD@{1}..HEAD" --no-merges | head -30 >> "$GITHUB_STEP_SUMMARY"
